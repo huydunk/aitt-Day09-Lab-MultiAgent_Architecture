@@ -184,7 +184,10 @@ def render_data_worker(entry: dict) -> None:
 
 def render_response_worker(entry: dict) -> None:
     out = entry.get("output", "")
-    st.markdown(out)
+    if out.startswith("Status: error"):
+        st.error(out)
+    else:
+        st.markdown(out)
 
 
 # ── sidebar: config status + reinit ──────────────────────────────────────────

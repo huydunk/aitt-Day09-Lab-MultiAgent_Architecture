@@ -166,14 +166,17 @@ def build_graph(llm: Any, vector_store: ChromaPolicyStore, data_tools: list, set
 
 
 def supervisor_node(state: ShoppingState, llm: Any) -> ShoppingState:
-    messages = [
-        SystemMessage(content=SUPERVISOR_PROMPT),
-        HumanMessage(content=state["question"]),
-    ]
-    response = llm.invoke(messages)
-    route = extract_json_payload(response.content)
-    if not route:
-        route = {"status": "ok", "needs_policy": True, "needs_data": False, "clarification_question": None}
+    try:
+        messages = [
+            SystemMessage(content=SUPERVISOR_PROMPT),
+            HumanMessage(content=state["question"]),
+        ]
+        response = llm.invoke(messages)
+        route = extract_json_payload(response.content)
+        if not route:
+            route = {"status": "ok", "needs_policy": True, "needs_data": False, "clarification_question": None}
+    except Exception as e:
+        route = {"status": "error", "error": str(e), "needs_policy": False, "needs_data": False, "clarification_question": None}
     return {
         "route": route,
         "trace": [{"node": "supervisor", "output": route}],
@@ -184,25 +187,25 @@ def worker_1_policy_node(
     state: ShoppingState, llm: Any, vector_store: ChromaPolicyStore, top_k: int
 ) -> ShoppingState:
     question = state["question"]
-    hits = vector_store.search(question, top_k=top_k)
-
-    chunks_text = "\n\n".join(
-        f"[{h['citation']}]\n{h['content']}" for h in hits
-    )
-
-    messages = [
-        SystemMessage(content=POLICY_WORKER_PROMPT),
-        HumanMessage(content=f"Câu hỏi: {question}\n\nChính sách liên quan:\n{chunks_text}"),
-    ]
-    response = llm.invoke(messages)
-    policy_result = extract_json_payload(response.content)
-    if not policy_result:
-        policy_result = {
-            "status": "ok",
-            "summary": response.content,
-            "facts": [],
-            "citations": [h["citation"] for h in hits],
-        }
+    try:
+        hits = vector_store.search(question, top_k=top_k)
+        chunks_text = "\n\n".join(f"[{h['citation']}]\n{h['content']}" for h in hits)
+        messages = [
+            SystemMessage(content=POLICY_WORKER_PROMPT),
+            HumanMessage(content=f"Câu hỏi: {question}\n\nChính sách liên quan:\n{chunks_text}"),
+        ]
+        response = llm.invoke(messages)
+        policy_result = extract_json_payload(response.content)
+        if not policy_result:
+            policy_result = {
+                "status": "ok",
+                "summary": response.content,
+                "facts": [],
+                "citations": [h["citation"] for h in hits],
+            }
+    except Exception as e:
+        hits = []
+        policy_result = {"status": "error", "error": str(e), "summary": "", "facts": [], "citations": []}
 
     return {
         "policy_result": policy_result,
@@ -212,45 +215,59 @@ def worker_1_policy_node(
 
 def worker_2_data_node(state: ShoppingState, data_agent: Any) -> ShoppingState:
     question = state["question"]
-    result = data_agent.invoke({"messages": [HumanMessage(content=question)]})
-
-    messages = result.get("messages", [])
-    last_content = get_last_ai_content(messages)
-    data_result = extract_json_payload(last_content)
-    if not data_result:
-        data_result = {
-            "status": "ok",
-            "summary": last_content,
-            "facts": [],
-            "missing_fields": [],
-            "not_found_entities": [],
-        }
+    try:
+        result = data_agent.invoke({"messages": [HumanMessage(content=question)]})
+        messages = result.get("messages", [])
+        last_content = get_last_ai_content(messages)
+        data_result = extract_json_payload(last_content)
+        if not data_result:
+            data_result = {
+                "status": "ok",
+                "summary": last_content,
+                "facts": [],
+                "missing_fields": [],
+                "not_found_entities": [],
+            }
+        serialized = [serialize_message(m) for m in messages]
+    except Exception as e:
+        data_result = {"status": "error", "error": str(e), "summary": "", "facts": [], "missing_fields": [], "not_found_entities": []}
+        serialized = []
 
     return {
         "data_result": data_result,
-        "trace": [
-            {
-                "node": "worker_data",
-                "messages": [serialize_message(m) for m in messages],
-                "output": data_result,
-            }
-        ],
+        "trace": [{"node": "worker_data", "messages": serialized, "output": data_result}],
     }
 
 
 def worker_3_response_node(state: ShoppingState, llm: Any) -> ShoppingState:
-    context = (
-        f"Câu hỏi của khách hàng: {state['question']}\n\n"
-        f"Routing: {json.dumps(state.get('route'), ensure_ascii=False)}\n\n"
-        f"Kết quả Policy Worker: {json.dumps(state.get('policy_result'), ensure_ascii=False)}\n\n"
-        f"Kết quả Data Worker: {json.dumps(state.get('data_result'), ensure_ascii=False)}"
-    )
-    messages = [
-        SystemMessage(content=RESPONSE_WORKER_PROMPT),
-        HumanMessage(content=context),
-    ]
-    response = llm.invoke(messages)
+    # Surface any upstream errors directly without calling the LLM again
+    for result_key in ("route", "policy_result", "data_result"):
+        result = state.get(result_key) or {}
+        if result.get("status") == "error":
+            err = result.get("error", "Unknown error")
+            final_answer = f"Status: error\nMessage: {err}"
+            return {
+                "final_answer": final_answer,
+                "trace": [{"node": "worker_response", "output": final_answer}],
+            }
+
+    try:
+        context = (
+            f"Câu hỏi của khách hàng: {state['question']}\n\n"
+            f"Routing: {json.dumps(state.get('route'), ensure_ascii=False)}\n\n"
+            f"Kết quả Policy Worker: {json.dumps(state.get('policy_result'), ensure_ascii=False)}\n\n"
+            f"Kết quả Data Worker: {json.dumps(state.get('data_result'), ensure_ascii=False)}"
+        )
+        messages = [
+            SystemMessage(content=RESPONSE_WORKER_PROMPT),
+            HumanMessage(content=context),
+        ]
+        response = llm.invoke(messages)
+        final_answer = response.content
+    except Exception as e:
+        final_answer = f"Status: error\nMessage: {e}"
+
     return {
-        "final_answer": response.content,
-        "trace": [{"node": "worker_response", "output": response.content}],
+        "final_answer": final_answer,
+        "trace": [{"node": "worker_response", "output": final_answer}],
     }
