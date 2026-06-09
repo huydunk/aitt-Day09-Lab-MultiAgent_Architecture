@@ -1,48 +1,95 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 
 class ShoppingDataStore:
-    """Student scaffold for mock-data lookup."""
+    """Mock-data store with fast index-based lookups."""
 
     def __init__(self, json_path: Path) -> None:
-        # TODO 1:
-        # - đọc JSON
-        # - lưu `metadata`, `customers`, `orders`, `vouchers`
-        # - build các index để lookup nhanh
-        raise NotImplementedError("Student TODO: load mock data and build indexes")
+        raw = json.loads(json_path.read_text(encoding="utf-8"))
+        self.metadata: dict[str, Any] = raw["metadata"]
+
+        self.customers: dict[str, Any] = {c["customer_id"]: c for c in raw["customers"]}
+
+        self.orders: dict[str, Any] = {o["order_id"]: o for o in raw["orders"]}
+
+        self.orders_by_customer: dict[str, list[dict[str, Any]]] = {}
+        for order in raw["orders"]:
+            self.orders_by_customer.setdefault(order["customer_id"], []).append(order)
+
+        self.vouchers_by_customer: dict[str, list[dict[str, Any]]] = {}
+        for voucher in raw["vouchers"]:
+            self.vouchers_by_customer.setdefault(voucher["customer_id"], []).append(voucher)
 
     def get_customer_by_id(self, customer_id: str) -> dict[str, Any]:
-        # TODO 2:
-        # - trả {"status":"ok","customer":...} hoặc {"status":"not_found", ...}
-        raise NotImplementedError
+        customer = self.customers.get(customer_id)
+        if customer is None:
+            return {"status": "not_found", "customer_id": customer_id}
+        return {"status": "ok", "customer": customer}
 
     def get_orders_by_customer_id(self, customer_id: str, limit: int = 10) -> dict[str, Any]:
-        # TODO 3:
-        # - trả danh sách order gần nhất cho customer
-        raise NotImplementedError
+        orders = self.orders_by_customer.get(customer_id, [])
+        if not orders:
+            return {"status": "not_found", "customer_id": customer_id}
+        sorted_orders = sorted(orders, key=lambda o: o.get("created_at", ""), reverse=True)
+        return {"status": "ok", "customer_id": customer_id, "orders": sorted_orders[:limit]}
 
     def get_order_detail_by_order_id(self, order_id: str) -> dict[str, Any]:
-        # TODO 4:
-        # - trả chi tiết một order
-        raise NotImplementedError
+        order = self.orders.get(order_id)
+        if order is None:
+            return {"status": "not_found", "order_id": order_id}
+        return {"status": "ok", "order": order}
 
     def get_vouchers_by_customer_id(
         self,
         customer_id: str,
         only_active: bool = False,
     ) -> dict[str, Any]:
-        # TODO 5:
-        # - lọc voucher theo customer
-        # - nếu `only_active=True` thì chỉ giữ voucher còn dùng được
-        raise NotImplementedError
+        vouchers = self.vouchers_by_customer.get(customer_id, [])
+        if not vouchers:
+            return {"status": "not_found", "customer_id": customer_id}
+        if only_active:
+            vouchers = [v for v in vouchers if v.get("status") == "active"]
+        return {"status": "ok", "customer_id": customer_id, "vouchers": vouchers}
 
 
 def build_data_tools(store: ShoppingDataStore) -> list:
-    # TODO 6:
-    # - dùng decorator @tool của LangChain
-    # - wrap 4 methods lookup thành 4 tools nhỏ
-    # - mô tả tool rõ ràng để LLM chọn đúng
-    raise NotImplementedError("Student TODO: build lookup tools")
+    from langchain_core.tools import tool
+
+    @tool
+    def get_customer_by_id(customer_id: str) -> dict:
+        """Look up a customer's profile (name, tier, loyalty points, account status)
+        by their customer ID (e.g. 'C001'). Use this when the user asks about
+        a specific customer's information."""
+        return store.get_customer_by_id(customer_id)
+
+    @tool
+    def get_orders_by_customer_id(customer_id: str) -> dict:
+        """Get the most recent orders placed by a customer, given their customer ID
+        (e.g. 'C001'). Use this when the user asks for a customer's order history
+        or wants to know what orders they have."""      
+        return store.get_orders_by_customer_id(customer_id)
+
+    @tool
+    def get_order_detail_by_order_id(order_id: str) -> dict:
+        """Get full details of a single order by its order ID (e.g. '1971').
+        Returns status, items, shipping, payment, return eligibility and more.
+        Use this when the user asks about a specific order."""
+        return store.get_order_detail_by_order_id(order_id)
+
+    @tool
+    def get_vouchers_by_customer_id(customer_id: str, only_active: bool = False) -> dict:
+        """Get vouchers belonging to a customer by their customer ID (e.g. 'C001').
+        Set only_active=True to return only vouchers that are currently usable.
+        Use this when the user asks about coupons, discounts, or vouchers."""
+        return store.get_vouchers_by_customer_id(customer_id, only_active=only_active)
+
+    return [
+        get_customer_by_id,
+        get_orders_by_customer_id,
+        get_order_detail_by_order_id,
+        get_vouchers_by_customer_id,
+    ]

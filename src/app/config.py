@@ -20,6 +20,7 @@ class Settings:
     traces_dir: Path
     embedding_model_name: str
     top_k: int
+    anthropic_api_key: str | None
     google_api_key: str | None
     openai_api_key: str | None
     openrouter_api_key: str | None
@@ -55,6 +56,7 @@ class Settings:
                 "sentence-transformers/all-MiniLM-L6-v2",
             ),
             top_k=int(os.getenv("RAG_TOP_K", "4")),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
             google_api_key=os.getenv("GOOGLE_API_KEY"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -73,6 +75,8 @@ class Settings:
 
 def _infer_provider(model: str) -> str:
     normalized = model.lower()
+    if normalized.startswith("claude"):
+        return "claude"
     if normalized.startswith("gemini"):
         return "gemini"
     if normalized.startswith("gpt") or normalized.startswith("o1") or normalized.startswith("o3"):
